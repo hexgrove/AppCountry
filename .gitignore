@@ -1,0 +1,8 @@
+.config
+.vs
+Data/
+
+Properties
+bin
+obj
+WebCountry.csproj.user
