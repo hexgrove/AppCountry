@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
 using WebCountry.Models;
 using WebCountry.Services;
 
@@ -54,7 +55,11 @@ namespace WebCountry.Controllers
                 _logger.LogInformation("Looking up country for IP: {Ip}", ipAddress);
             }
 
+            Stopwatch stopwatch = Stopwatch.StartNew();
             var result = await _geoIPService.GetCountryByIPAsync(ipAddress);
+            stopwatch.Stop();
+
+            Console.WriteLine($"{DateTime.Now:O} Looking up country for IP({ipAddress}:{result.Country}) finished, Elapsed: {stopwatch.ElapsedMilliseconds}ms");
 
             // Success when IsSuccess is null (indicating success without error fields)
             if (result.IsSuccess == null)
