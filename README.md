@@ -1,25 +1,42 @@
 # WebCountry - IP to Country Lookup API
 
-A .NET 6 Web API service that provides IP address to country lookup functionality using MaxMind GeoLite2 database.
+A .NET 6 Web API service that provides IP address to country lookup functionality using dual data sources: IPInfo and MaxMind GeoLite2 databases with automatic fallback.
 
 ## Features
 
 - RESTful API for IP geolocation lookup
-- Automatic MaxMind database updates (configurable interval)
+- **Dual data sources** with automatic fallback (IPInfo → MaxMind)
+- Automatic database updates for both data sources (configurable interval)
 - Support for both IPv4 and IPv6 addresses
 - Client IP detection for "my location" queries
 - Manual database update endpoint
 - Database status monitoring
+- Source tracking (indicates which database provided the result)
 - Comprehensive error handling and logging
 
 ## Configuration
 
-1. Register for a free MaxMind account at https://www.maxmind.com/en/geolite2/signup
-2. Obtain your Account ID and License Key from MaxMind dashboard
-3. Update `appsettings.json` with your MaxMind credentials:
+### Required Setup
+
+1. **IPInfo Configuration**:
+   - Obtain your IPInfo token from https://ipinfo.io
+   - Update `appsettings.json` with your IPInfo token:
+
+2. **MaxMind Configuration** (Fallback):
+   - Register for a free MaxMind account at https://www.maxmind.com/en/geolite2/signup
+   - Obtain your Account ID and License Key from MaxMind dashboard
+
+3. **Update `appsettings.json`** with your credentials:
 
 ```json
 {
+  "IPInfo": {
+    "Token": "YOUR_IPINFO_TOKEN",
+    "DatabasePath": "Data/ipinfo_lite.mmdb",
+    "DownloadUrl": "https://ipinfo.io/data/ipinfo_lite.mmdb?_src=frontend&token={0}",
+    "UpdateIntervalHours": 168,
+    "DatabaseEdition": "ipinfo_lite"
+  },
   "MaxMind": {
     "AccountId": "YOUR_ACCOUNT_ID",
     "LicenseKey": "YOUR_LICENSE_KEY",
@@ -30,6 +47,8 @@ A .NET 6 Web API service that provides IP address to country lookup functionalit
   }
 }
 ```
+
+**Security Note**: Never commit actual tokens or API keys to version control. Use environment variables or secure configuration management.
 
 ## Installation
 
@@ -75,14 +94,17 @@ GET /api/ip/status
 ```
 Returns detailed information about the MaxMind database status.
 
-**Success Response** (clean, data-only):
+**Success Response** (clean, data-only with source tracking):
 ```json
 {
   "ip": "8.8.8.8",
   "country": "US",
-  "countryName": "United States"
+  "countryName": "United States",
+  "source": "ipinfo"
 }
 ```
+
+Note: The `source` field indicates which database provided the result (`"ipinfo"` or `"maxmind"`). If IPInfo lookup fails, the API automatically falls back to MaxMind.
 
 **Error Response** (includes error details):
 ```json
@@ -123,13 +145,25 @@ Manually triggers a database update from MaxMind.
 
 ## Configuration Options
 
-### MaxMind Settings
+### IPInfo Settings (Primary Data Source)
+- `Token`: Your IPInfo API token (obtain from https://ipinfo.io)
+- `DatabasePath`: Local path where the IPInfo database file will be stored
+- `DownloadUrl`: IPInfo download URL template
+- `UpdateIntervalHours`: How often to check for database updates (default: 168 hours = 1 week)
+- `DatabaseEdition`: IPInfo database edition (ipinfo_lite)
+
+### MaxMind Settings (Fallback Data Source)
 - `AccountId`: Your MaxMind account ID
 - `LicenseKey`: Your MaxMind license key
 - `DatabasePath`: Local path where the database file will be stored
 - `DownloadUrl`: MaxMind download URL template
 - `UpdateIntervalHours`: How often to check for database updates (default: 168 hours = 1 week)
 - `DatabaseEdition`: MaxMind database edition (GeoLite2-Country)
+
+### Query Flow
+1. **Primary**: Query IPInfo database first
+2. **Fallback**: If not found or error, query MaxMind database
+3. **Response**: Include `source` field indicating which database was used
 
 ### Swagger Documentation Settings
 - `EnableSwaggerInProduction`: Set to `true` to enable Swagger in production environment (default: `false`)
@@ -212,11 +246,13 @@ When enabled in production, Swagger will be available at: `https://yourapp.com/d
 
 ## Security Considerations
 
-- Store MaxMind credentials securely (consider using environment variables or Azure Key Vault)
+- **NEVER commit API tokens or credentials to version control**
+- Store IPInfo tokens and MaxMind credentials securely (use environment variables, Azure Key Vault, or other secure configuration management)
 - Implement rate limiting for production use
 - Consider adding authentication for sensitive endpoints like manual database updates
 - Validate and sanitize all input IP addresses
 - **Swagger in Production**: Only enable if necessary, consider adding authentication
+- Regularly rotate API tokens and credentials
 
 ## License
 
