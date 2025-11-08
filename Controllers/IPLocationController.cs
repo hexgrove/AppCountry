@@ -59,7 +59,12 @@ namespace WebCountry.Controllers
             var result = await _geoIPService.GetCountryByIPAsync(ipAddress);
             stopwatch.Stop();
 
-            Console.WriteLine($"{DateTime.Now:O} Looking up country for IP({ipAddress}:{result.Country}) finished, Elapsed: {stopwatch.ElapsedMilliseconds}ms");
+            var msg = result.Country;
+            if (string.IsNullOrEmpty(msg))
+            {
+                msg = "NotFound";
+            }
+            Console.WriteLine($"{DateTime.Now:O} {ipAddress}:{msg} {stopwatch.ElapsedMilliseconds}ms");
 
             // Success when IsSuccess is null (indicating success without error fields)
             if (result.IsSuccess == null)

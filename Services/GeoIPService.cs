@@ -5,6 +5,7 @@ using WebCountry.Models;
 using WebCountry.Utils;
 using ICSharpCode.SharpZipLib.GZip;
 using ICSharpCode.SharpZipLib.Tar;
+using MaxMind.Db;
 
 namespace WebCountry.Services
 {
@@ -14,7 +15,7 @@ namespace WebCountry.Services
         private readonly IPInfoOptions _ipInfoOptions;
         private readonly ILogger<GeoIPService> _logger;
         private readonly HttpClient _httpClient;
-        private DatabaseReader? _ipInfoReader;
+        private Reader? _ipInfoReader;
         private DatabaseReader? _maxMindReader;
         private readonly object _lockObject = new();
 
@@ -65,20 +66,26 @@ namespace WebCountry.Services
                     {
                         try
                         {
-                            var response = _ipInfoReader.Country(ip!);
-                            return new IPLocationResponse
+                            var data = _ipInfoReader.Find<Dictionary<string, object>>(ip!);
+                            if (data != null && data.TryGetValue("country_code", out var countryCode))
                             {
-                                Ip = ipAddress,
-                                Country = response.Country.IsoCode,
-                                CountryName = response.Country.Name,
-                                Source = "ipinfo",
-                                IsSuccess = null,  // Success - don't include in JSON
-                                Message = null     // Success - don't include in JSON
-                            };
-                        }
-                        catch (AddressNotFoundException)
-                        {
-                            _logger.LogDebug("IP address {Ip} not found in IPInfo database, trying MaxMind", ipAddress);
+                                var country = countryCode?.ToString();
+                                var countryName = data.TryGetValue("country", out var name) ? name?.ToString() : string.Empty;
+
+                                return new IPLocationResponse
+                                {
+                                    Ip = ipAddress,
+                                    Country = country,
+                                    CountryName = countryName,
+                                    Source = "ipinfo",
+                                    IsSuccess = null,  // Success - don't include in JSON
+                                    Message = null     // Success - don't include in JSON
+                                };
+                            }
+                            else
+                            {
+                                _logger.LogDebug("IP address {Ip} not found in IPInfo database, trying MaxMind", ipAddress);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -355,7 +362,7 @@ namespace WebCountry.Services
 
                 if (File.Exists(_ipInfoOptions.DatabasePath))
                 {
-                    _ipInfoReader = new DatabaseReader(_ipInfoOptions.DatabasePath);
+                    _ipInfoReader = new Reader(_ipInfoOptions.DatabasePath);
                     _logger.LogInformation("IPInfo database loaded from: {DatabasePath}", _ipInfoOptions.DatabasePath);
                 }
                 else
