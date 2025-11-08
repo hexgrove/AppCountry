@@ -10,18 +10,25 @@ namespace WebCountry.Services
 {
     public class GeoIPService : IGeoIPService, IDisposable
     {
-        private readonly MaxMindOptions _options;
+        private readonly MaxMindOptions _maxMindOptions;
+        private readonly IPInfoOptions _ipInfoOptions;
         private readonly ILogger<GeoIPService> _logger;
         private readonly HttpClient _httpClient;
-        private DatabaseReader? _reader;
+        private DatabaseReader? _ipInfoReader;
+        private DatabaseReader? _maxMindReader;
         private readonly object _lockObject = new();
 
-        public GeoIPService(IOptions<MaxMindOptions> options, ILogger<GeoIPService> logger, HttpClient httpClient)
+        public GeoIPService(
+            IOptions<MaxMindOptions> maxMindOptions,
+            IOptions<IPInfoOptions> ipInfoOptions,
+            ILogger<GeoIPService> logger,
+            HttpClient httpClient)
         {
-            _options = options.Value;
+            _maxMindOptions = maxMindOptions.Value;
+            _ipInfoOptions = ipInfoOptions.Value;
             _logger = logger;
             _httpClient = httpClient;
-            InitializeDatabase();
+            InitializeDatabases();
         }
 
         public async Task<IPLocationResponse> GetCountryByIPAsync(string ipAddress)
@@ -40,10 +47,10 @@ namespace WebCountry.Services
                     };
                 }
 
-                // Use lock to ensure thread safety when accessing _reader
+                // Use lock to ensure thread safety when accessing readers
                 lock (_lockObject)
                 {
-                    if (_reader == null)
+                    if (_ipInfoReader == null && _maxMindReader == null)
                     {
                         return new IPLocationResponse
                         {
@@ -53,27 +60,65 @@ namespace WebCountry.Services
                         };
                     }
 
-                    try
+                    // Try IPInfo first
+                    if (_ipInfoReader != null)
                     {
-                        var response = _reader.Country(ip!);
-                        return new IPLocationResponse
+                        try
                         {
-                            Ip = ipAddress,
-                            Country = response.Country.IsoCode,
-                            CountryName = response.Country.Name,
-                            IsSuccess = null,  // Success - don't include in JSON
-                            Message = null     // Success - don't include in JSON
-                        };
+                            var response = _ipInfoReader.Country(ip!);
+                            return new IPLocationResponse
+                            {
+                                Ip = ipAddress,
+                                Country = response.Country.IsoCode,
+                                CountryName = response.Country.Name,
+                                Source = "ipinfo",
+                                IsSuccess = null,  // Success - don't include in JSON
+                                Message = null     // Success - don't include in JSON
+                            };
+                        }
+                        catch (AddressNotFoundException)
+                        {
+                            _logger.LogDebug("IP address {Ip} not found in IPInfo database, trying MaxMind", ipAddress);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Error querying IPInfo database for IP {Ip}, trying MaxMind", ipAddress);
+                        }
                     }
-                    catch (AddressNotFoundException)
+
+                    // Fallback to MaxMind
+                    if (_maxMindReader != null)
                     {
-                        return new IPLocationResponse
+                        try
                         {
-                            Ip = ipAddress,
-                            IsSuccess = false,
-                            Message = "IP address not found in database"
-                        };
+                            var response = _maxMindReader.Country(ip!);
+                            return new IPLocationResponse
+                            {
+                                Ip = ipAddress,
+                                Country = response.Country.IsoCode,
+                                CountryName = response.Country.Name,
+                                Source = "maxmind",
+                                IsSuccess = null,  // Success - don't include in JSON
+                                Message = null     // Success - don't include in JSON
+                            };
+                        }
+                        catch (AddressNotFoundException)
+                        {
+                            return new IPLocationResponse
+                            {
+                                Ip = ipAddress,
+                                IsSuccess = false,
+                                Message = "IP address not found in database"
+                            };
+                        }
                     }
+
+                    return new IPLocationResponse
+                    {
+                        Ip = ipAddress,
+                        IsSuccess = false,
+                        Message = "IP address not found in database"
+                    };
                 }
             }
             catch (Exception ex)
@@ -90,19 +135,84 @@ namespace WebCountry.Services
 
         public async Task<bool> UpdateDatabaseAsync()
         {
+            var ipInfoSuccess = await UpdateIPInfoDatabaseAsync();
+            var maxMindSuccess = await UpdateMaxMindDatabaseAsync();
+
+            return ipInfoSuccess && maxMindSuccess;
+        }
+
+        private async Task<bool> UpdateIPInfoDatabaseAsync()
+        {
+            try
+            {
+                _logger.LogInformation("Starting IPInfo database update");
+
+                // Create data directory if it doesn't exist
+                var dataDirectory = Path.GetDirectoryName(_ipInfoOptions.DatabasePath);
+                if (!string.IsNullOrEmpty(dataDirectory) && !Directory.Exists(dataDirectory))
+                {
+                    Directory.CreateDirectory(dataDirectory);
+                }
+
+                // Download the database (direct .mmdb file, no need to extract)
+                var downloadUrl = string.Format(_ipInfoOptions.DownloadUrl, _ipInfoOptions.Token);
+                var tempFile = Path.GetTempFileName();
+
+                try
+                {
+                    using var response = await _httpClient.GetAsync(downloadUrl);
+                    response.EnsureSuccessStatusCode();
+
+                    await using var fileStream = File.Create(tempFile);
+                    await response.Content.CopyToAsync(fileStream);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to download IPInfo database");
+                    File.Delete(tempFile);
+                    return false;
+                }
+
+                // Replace the old database
+                lock (_lockObject)
+                {
+                    _ipInfoReader?.Dispose();
+                    _ipInfoReader = null;
+
+                    if (File.Exists(_ipInfoOptions.DatabasePath))
+                    {
+                        File.Delete(_ipInfoOptions.DatabasePath);
+                    }
+
+                    File.Move(tempFile, _ipInfoOptions.DatabasePath);
+                    InitializeIPInfoDatabase();
+                }
+
+                _logger.LogInformation("IPInfo database updated successfully");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to update IPInfo database");
+                return false;
+            }
+        }
+
+        private async Task<bool> UpdateMaxMindDatabaseAsync()
+        {
             try
             {
                 _logger.LogInformation("Starting MaxMind database update");
 
                 // Create data directory if it doesn't exist
-                var dataDirectory = Path.GetDirectoryName(_options.DatabasePath);
+                var dataDirectory = Path.GetDirectoryName(_maxMindOptions.DatabasePath);
                 if (!string.IsNullOrEmpty(dataDirectory) && !Directory.Exists(dataDirectory))
                 {
                     Directory.CreateDirectory(dataDirectory);
                 }
 
                 // Download the database
-                var downloadUrl = string.Format(_options.DownloadUrl, _options.LicenseKey);
+                var downloadUrl = string.Format(_maxMindOptions.DownloadUrl, _maxMindOptions.LicenseKey);
                 var tempFile = Path.GetTempFileName();
 
                 try
@@ -131,16 +241,16 @@ namespace WebCountry.Services
                 // Replace the old database
                 lock (_lockObject)
                 {
-                    _reader?.Dispose();
-                    _reader = null;
+                    _maxMindReader?.Dispose();
+                    _maxMindReader = null;
 
-                    if (File.Exists(_options.DatabasePath))
+                    if (File.Exists(_maxMindOptions.DatabasePath))
                     {
-                        File.Delete(_options.DatabasePath);
+                        File.Delete(_maxMindOptions.DatabasePath);
                     }
 
-                    File.Move(extractedPath, _options.DatabasePath);
-                    InitializeDatabase();
+                    File.Move(extractedPath, _maxMindOptions.DatabasePath);
+                    InitializeMaxMindDatabase();
                 }
 
                 File.Delete(tempFile);
@@ -158,7 +268,8 @@ namespace WebCountry.Services
         {
             lock (_lockObject)
             {
-                return _reader != null && File.Exists(_options.DatabasePath);
+                return (_ipInfoReader != null && File.Exists(_ipInfoOptions.DatabasePath)) ||
+                       (_maxMindReader != null && File.Exists(_maxMindOptions.DatabasePath));
             }
         }
 
@@ -167,60 +278,121 @@ namespace WebCountry.Services
             lock (_lockObject)
             {
                 var response = new DatabaseStatusResponse();
+                var statuses = new List<string>();
 
-                if (File.Exists(_options.DatabasePath))
+                // Check IPInfo database
+                if (File.Exists(_ipInfoOptions.DatabasePath))
                 {
                     try
                     {
-                        var fileInfo = new FileInfo(_options.DatabasePath);
-                        response.IsAvailable = _reader != null;
-                        response.LastModified = fileInfo.LastWriteTime;
-                        response.Message = response.IsAvailable
-                            ? "Database is available and loaded"
-                            : "Database file exists but not loaded";
+                        var fileInfo = new FileInfo(_ipInfoOptions.DatabasePath);
+                        var available = _ipInfoReader != null;
+                        statuses.Add($"IPInfo: {(available ? "available" : "file exists but not loaded")} (last modified: {fileInfo.LastWriteTime})");
+
+                        if (available && response.LastModified == null)
+                        {
+                            response.LastModified = fileInfo.LastWriteTime;
+                        }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Error getting database file information");
-                        response.IsAvailable = false;
-                        response.Message = "Error accessing database file";
+                        _logger.LogError(ex, "Error getting IPInfo database file information");
+                        statuses.Add("IPInfo: error accessing database file");
                     }
                 }
                 else
                 {
-                    response.IsAvailable = false;
-                    response.Message = "Database file not found";
+                    statuses.Add("IPInfo: database file not found");
                 }
+
+                // Check MaxMind database
+                if (File.Exists(_maxMindOptions.DatabasePath))
+                {
+                    try
+                    {
+                        var fileInfo = new FileInfo(_maxMindOptions.DatabasePath);
+                        var available = _maxMindReader != null;
+                        statuses.Add($"MaxMind: {(available ? "available" : "file exists but not loaded")} (last modified: {fileInfo.LastWriteTime})");
+
+                        if (available && response.LastModified == null)
+                        {
+                            response.LastModified = fileInfo.LastWriteTime;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error getting MaxMind database file information");
+                        statuses.Add("MaxMind: error accessing database file");
+                    }
+                }
+                else
+                {
+                    statuses.Add("MaxMind: database file not found");
+                }
+
+                response.IsAvailable = _ipInfoReader != null || _maxMindReader != null;
+                response.Message = string.Join("; ", statuses);
 
                 return response;
             }
         }
 
-        private void InitializeDatabase()
+        private void InitializeDatabases()
         {
             lock (_lockObject)
             {
-                try
-                {
-                    _reader?.Dispose();
-                    _reader = null;
+                InitializeIPInfoDatabase();
+                InitializeMaxMindDatabase();
+            }
+        }
 
-                    if (File.Exists(_options.DatabasePath))
-                    {
-                        _reader = new DatabaseReader(_options.DatabasePath);
-                        _logger.LogInformation("MaxMind database loaded from: {DatabasePath}", _options.DatabasePath);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("MaxMind database not found at: {DatabasePath}", _options.DatabasePath);
-                    }
-                }
-                catch (Exception ex)
+        private void InitializeIPInfoDatabase()
+        {
+            try
+            {
+                _ipInfoReader?.Dispose();
+                _ipInfoReader = null;
+
+                if (File.Exists(_ipInfoOptions.DatabasePath))
                 {
-                    _logger.LogError(ex, "Failed to initialize MaxMind database");
-                    _reader?.Dispose();
-                    _reader = null;
+                    _ipInfoReader = new DatabaseReader(_ipInfoOptions.DatabasePath);
+                    _logger.LogInformation("IPInfo database loaded from: {DatabasePath}", _ipInfoOptions.DatabasePath);
                 }
+                else
+                {
+                    _logger.LogWarning("IPInfo database not found at: {DatabasePath}", _ipInfoOptions.DatabasePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize IPInfo database");
+                _ipInfoReader?.Dispose();
+                _ipInfoReader = null;
+            }
+        }
+
+        private void InitializeMaxMindDatabase()
+        {
+            try
+            {
+                _maxMindReader?.Dispose();
+                _maxMindReader = null;
+
+                if (File.Exists(_maxMindOptions.DatabasePath))
+                {
+                    _maxMindReader = new DatabaseReader(_maxMindOptions.DatabasePath);
+                    _logger.LogInformation("MaxMind database loaded from: {DatabasePath}", _maxMindOptions.DatabasePath);
+                }
+                else
+                {
+                    _logger.LogWarning("MaxMind database not found at: {DatabasePath}", _maxMindOptions.DatabasePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize MaxMind database");
+                _maxMindReader?.Dispose();
+                _maxMindReader = null;
             }
         }
 
@@ -270,8 +442,10 @@ namespace WebCountry.Services
         {
             lock (_lockObject)
             {
-                _reader?.Dispose();
-                _reader = null;
+                _ipInfoReader?.Dispose();
+                _ipInfoReader = null;
+                _maxMindReader?.Dispose();
+                _maxMindReader = null;
             }
         }
     }

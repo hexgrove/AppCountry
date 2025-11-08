@@ -6,16 +6,19 @@ namespace WebCountry.Services
     public class DatabaseUpdateService : BackgroundService
     {
         private readonly IGeoIPService _geoIPService;
-        private readonly MaxMindOptions _options;
+        private readonly MaxMindOptions _maxMindOptions;
+        private readonly IPInfoOptions _ipInfoOptions;
         private readonly ILogger<DatabaseUpdateService> _logger;
 
         public DatabaseUpdateService(
             IGeoIPService geoIPService,
-            IOptions<MaxMindOptions> options,
+            IOptions<MaxMindOptions> maxMindOptions,
+            IOptions<IPInfoOptions> ipInfoOptions,
             ILogger<DatabaseUpdateService> logger)
         {
             _geoIPService = geoIPService;
-            _options = options.Value;
+            _maxMindOptions = maxMindOptions.Value;
+            _ipInfoOptions = ipInfoOptions.Value;
             _logger = logger;
         }
 
@@ -34,8 +37,10 @@ namespace WebCountry.Services
             {
                 try
                 {
-                    var delay = TimeSpan.FromHours(_options.UpdateIntervalHours);
-                    _logger.LogInformation("Next database update scheduled in {Hours} hours", _options.UpdateIntervalHours);
+                    // Use the minimum update interval to ensure both databases are updated regularly
+                    var updateIntervalHours = Math.Min(_ipInfoOptions.UpdateIntervalHours, _maxMindOptions.UpdateIntervalHours);
+                    var delay = TimeSpan.FromHours(updateIntervalHours);
+                    _logger.LogInformation("Next database update scheduled in {Hours} hours", updateIntervalHours);
 
                     await Task.Delay(delay, stoppingToken);
 
