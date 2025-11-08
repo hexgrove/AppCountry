@@ -20,6 +20,10 @@ namespace WebCountry
             builder.Services.Configure<MaxMindOptions>(
                 builder.Configuration.GetSection(MaxMindOptions.SectionName));
 
+            // Configure IPInfo options
+            builder.Services.Configure<IPInfoOptions>(
+                builder.Configuration.GetSection(IPInfoOptions.SectionName));
+
             // Add HttpClient for downloading database
             builder.Services.AddHttpClient<GeoIPService>();
 
